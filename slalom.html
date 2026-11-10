@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تحلیل اسلالوم - مرحله ۲: تست اسکلت بدن</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap">
+<style>
+:root{--bg:#0f1720;--card:#18232f;--line:#2a3a4a;--tx:#e8eef4;--mut:#93a4b5;--ac:#35d0a0;--warn:#f2c94c;--bad:#ff5d5d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:Vazirmatn,Tahoma,sans-serif;line-height:1.7;padding:12px;max-width:720px;margin-inline:auto}
+h1{font-size:1.15rem;margin:4px 0 12px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+label{display:block;color:var(--mut);font-size:.85rem;margin:8px 0 4px}
+select,input[type=file],button{width:100%;font:inherit;color:var(--tx);background:#0f1720;border:1px solid var(--line);border-radius:8px;padding:10px}
+button{background:var(--ac);color:#06241b;font-weight:700;border:0;margin-top:8px}
+button.sec{background:#0f1720;color:var(--tx);border:1px solid var(--line);font-weight:400}
+.stage{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden}
+.stage video,.stage canvas{display:block;width:100%;height:auto}
+.stage canvas{position:absolute;inset:0;pointer-events:none}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#status{color:var(--warn);font-size:.9rem;min-height:1.6em}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+td{padding:5px 2px;border-bottom:1px solid var(--line)}
+td:last-child{text-align:left;direction:ltr;font-weight:700}
+.leg span{display:inline-block;margin-inline-end:12px;font-size:.8rem;color:var(--mut)}
+.leg i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-inline-end:4px}
+</style>
+</head>
+<body>
+<h1>مرحله ۲: تست دقت تشخیص اسکلت بدن</h1>
+
+<div class="box">
+  <label for="file">ویدئو (استارت)</label>
+  <input type="file" id="file" accept="video/*">
+  <div class="row">
+    <div>
+      <label for="model">مدل</label>
+      <select id="model">
+        <option value="lite">Lite (سریع)</option>
+        <option value="full">Full</option>
+        <option value="heavy" selected>Heavy (دقیق‌ترین)</option>
+      </select>
+    </div>
+    <div>
+      <label for="speed">سرعت پخش</label>
+      <select id="speed">
+        <option value="1">۱x</option>
+        <option value="0.5" selected>۰.۵x</option>
+        <option value="0.25">۰.۲۵x</option>
+        <option value="0.1">۰.۱x</option>
+      </select>
+    </div>
+  </div>
+  <div id="status">در حال بارگذاری مدل...</div>
+</div>
+
+<div class="box">
+  <div class="stage" id="stage">
+    <video id="vid" playsinline muted controls></video>
+    <canvas id="cv"></canvas>
+  </div>
+  <div class="leg" style="margin-top:8px">
+    <span><i style="background:#35d0a0"></i>مطمئن</span>
+    <span><i style="background:#f2c94c"></i>نسبتاً مطمئن</span>
+    <span><i style="background:#ff5d5d"></i>ضعیف</span>
+  </div>
+  <div class="row">
+    <button id="reset" class="sec">شروع آمار از اول</button>
+    <button id="copy">کپی گزارش فنی</button>
+  </div>
+</div>
+
+<div class="box">
+  <table>
+    <tr><td>مدل فعال</td><td id="sModel">-</td></tr>
+    <tr><td>تعداد فریم تحلیل‌شده</td><td id="sFrames">0</td></tr>
+    <tr><td>فریم‌هایی که بدن پیدا شد</td><td id="sDet">0%</td></tr>
+    <tr><td>اطمینان مچ پا</td><td id="sAnk">-</td></tr>
+    <tr><td>اطمینان زانو</td><td id="sKnee">-</td></tr>
+    <tr><td>اطمینان لگن</td><td id="sHip">-</td></tr>
+    <tr><td>اطمینان شانه</td><td id="sSh">-</td></tr>
+    <tr><td>اطمینان کف و پاشنه</td><td id="sFoot">-</td></tr>
+  </table>
+</div>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = id => document.getElementById(id);
+const vid = $("vid"), cv = $("cv"), ctx = cv.getContext("2d");
+const statusEl = $("status");
+const GROUPS = { ank:[27,28], knee:[25,26], hip:[23,24], sh:[11,12], foot:[29,30,31,32] };
+const OUT = { ank:"sAnk", knee:"sKnee", hip:"sHip", sh:"sSh", foot:"sFoot" };
+
+let fileset = null, landmarker = null, modelName = "heavy";
+let stats, lastVideoTime = -1, running = false, fileName = "";
+
+function resetStats(){
+  stats = { frames:0, det:0, sum:{}, cnt:{} };
+  for (const g in GROUPS){ stats.sum[g]=0; stats.cnt[g]=0; }
+  render();
+}
+
+function render(){
+  $("sModel").textContent = modelName;
+  $("sFrames").textContent = stats.frames;
+  $("sDet").textContent = stats.frames ? Math.round(100*stats.det/stats.frames)+"%" : "-";
+  for (const g in GROUPS){
+    $(OUT[g]).textContent = stats.cnt[g] ? Math.round(100*stats.sum[g]/stats.cnt[g])+"%" : "-";
+  }
+}
+
+async function loadModel(name){
+  statusEl.textContent = "در حال بارگذاری مدل " + name + " ...";
+  try{
+    if (!fileset) fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    const url = `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${name}/float16/1/pose_landmarker_${name}.task`;
+    const make = delegate => PoseLandmarker.createFromOptions(fileset, {
+      baseOptions:{ modelAssetPath:url, delegate },
+      runningMode:"VIDEO", numPoses:1,
+      minPoseDetectionConfidence:0.4, minPosePresenceConfidence:0.4, minTrackingConfidence:0.4
+    });
+    if (landmarker) landmarker.close();
+    try { landmarker = await make("GPU"); }
+    catch(e){ landmarker = await make("CPU"); }
+    modelName = name;
+    resetStats();
+    statusEl.textContent = "مدل آماده است. یک ویدئو انتخاب کن و پخش کن.";
+  }catch(err){
+    statusEl.textContent = "خطا در بارگذاری مدل: " + (err && err.message ? err.message : err) + " (اینترنت را چک کن)";
+  }
+}
+
+function colorFor(v){ return v>=0.7 ? "#35d0a0" : v>=0.4 ? "#f2c94c" : "#ff5d5d"; }
+
+function draw(lm){
+  const w = cv.width, h = cv.height;
+  ctx.clearRect(0,0,w,h);
+  if (!lm) return;
+  const lw = Math.max(2, w/240);
+  for (const c of PoseLandmarker.POSE_CONNECTIONS){
+    const a = lm[c.start], b = lm[c.end];
+    if (!a || !b) continue;
+    ctx.strokeStyle = colorFor(Math.min(a.visibility, b.visibility));
+    ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(a.x*w, a.y*h); ctx.lineTo(b.x*w, b.y*h); ctx.stroke();
+  }
+  for (let i=11;i<lm.length;i++){
+    const p = lm[i];
+    ctx.fillStyle = colorFor(p.visibility);
+    ctx.beginPath(); ctx.arc(p.x*w, p.y*h, lw*1.6, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function processFrame(){
+  if (!landmarker || vid.readyState < 2) return;
+  if (vid.currentTime === lastVideoTime) return;
+  lastVideoTime = vid.currentTime;
+  const res = landmarker.detectForVideo(vid, performance.now());
+  stats.frames++;
+  const lm = res.landmarks && res.landmarks[0];
+  if (lm){
+    stats.det++;
+    for (const g in GROUPS) for (const i of GROUPS[g]){ stats.sum[g]+=lm[i].visibility; stats.cnt[g]++; }
+  }
+  draw(lm);
+  if (stats.frames % 5 === 0) render();
+}
+
+function loop(){
+  if (!running) return;
+  processFrame();
+  if ("requestVideoFrameCallback" in vid) vid.requestVideoFrameCallback(loop);
+  else requestAnimationFrame(loop);
+}
+
+vid.addEventListener("play", () => { running = true; loop(); });
+vid.addEventListener("pause", () => { running = false; render(); });
+vid.addEventListener("ended", () => { running = false; render(); });
+vid.addEventListener("seeked", () => { if (!running) { lastVideoTime = -1; processFrame(); render(); } });
+vid.addEventListener("loadedmetadata", () => {
+  cv.width = vid.videoWidth; cv.height = vid.videoHeight;
+  vid.playbackRate = parseFloat($("speed").value);
+});
+
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  fileName = f.name;
+  vid.src = URL.createObjectURL(f);
+  lastVideoTime = -1;
+  resetStats();
+  ctx.clearRect(0,0,cv.width,cv.height);
+});
+$("speed").addEventListener("change", () => { vid.playbackRate = parseFloat($("speed").value); });
+$("model").addEventListener("change", e => loadModel(e.target.value));
+$("reset").addEventListener("click", resetStats);
+
+$("copy").addEventListener("click", async () => {
+  const pct = g => stats.cnt[g] ? Math.round(100*stats.sum[g]/stats.cnt[g]) : null;
+  const rep = [
+    "گزارش فنی - مرحله ۲",
+    "فایل: " + (fileName || "-"),
+    "مدل: " + modelName,
+    "سرعت پخش: " + vid.playbackRate,
+    "اندازه ویدئو: " + vid.videoWidth + "x" + vid.videoHeight,
+    "فریم تحلیل‌شده: " + stats.frames,
+    "بدن پیدا شد: " + (stats.frames ? Math.round(100*stats.det/stats.frames) : 0) + "%",
+    "اطمینان مچ پا: " + pct("ank") + "%",
+    "اطمینان زانو: " + pct("knee") + "%",
+    "اطمینان لگن: " + pct("hip") + "%",
+    "اطمینان شانه: " + pct("sh") + "%",
+    "اطمینان کف و پاشنه: " + pct("foot") + "%",
+    "مرورگر: " + navigator.userAgent
+  ].join("\n");
+  try{ await navigator.clipboard.writeText(rep); statusEl.textContent = "گزارش کپی شد."; }
+  catch(e){ statusEl.textContent = "کپی نشد. دوباره بزن."; }
+});
+
+resetStats();
+loadModel("heavy");
+</script>
+</body>
+</html>
